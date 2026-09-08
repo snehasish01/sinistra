@@ -85,6 +85,8 @@ fn simulate_excludes_timed_out_trials_from_csv() {
     );
 
     // Every retained RT is a real crossing time, below the cap + t0 = 10.1 s.
+    // The 10.1 is MAX_SIM_TIME (10 s, sinistra_core) + this test's --t0 (0.1 s);
+    // update it if either of those changes.
     let text = fs::read_to_string(&csv).unwrap();
     for row in text.lines().skip(1).filter(|l| !l.is_empty()) {
         let rt: f64 = row.split(',').nth(1).unwrap().parse().unwrap();
