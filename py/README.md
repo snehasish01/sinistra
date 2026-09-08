@@ -13,7 +13,9 @@ py/
 ├── src/lib.rs              the #[pymodule]
 ├── python/sinistra/        pure-Python package (re-exports the compiled ext)
 ├── tests/test_smoke.py     pytest binding smoke test
-└── benches/marshalling.py  simulate() throughput (not pytest)
+├── benches/marshalling.py  simulate() throughput (not pytest)
+├── examples/recovery_plot.py  true-vs-recovered figure for both fitters
+└── benchmarks/vs_pyddm.py  dev-only comparison against PyDDM (see its README)
 ```
 
 ## Build / develop
@@ -68,3 +70,12 @@ with a specific message when the data cannot be fitted.
 end. At `n = 1_000_000` it runs at ~1.52M trials/sec — matching the core
 `simulate_n` criterion baseline from phase 1, i.e. the NumPy boundary adds no
 measurable overhead at scale.
+
+### Recovery figure
+
+`examples/recovery_plot.py` (needs `pip install matplotlib` and a `--release`
+build) runs a small recovery experiment (7 parameter sets × 5 replications,
+n = 50,000) through both fitters and writes `examples/recovery_plot.png` — a
+true-vs-recovered scatter that shows EZ's boundary-separation bias next to the
+simulation fit. It takes ~35–40 s (≈35 simulation fits), so the PNG is
+committed as a static asset rather than regenerated in CI.

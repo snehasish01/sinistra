@@ -26,6 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+examples = ["matplotlib>=3.6"]
 
 [tool.maturin]
 module-name = "sinistra._sinistra"
