@@ -1,0 +1,25 @@
+[package]
+name = "sinistra-core"
+description = "Core drift-diffusion model (DDM) simulation logic for cognitive science research"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "sinistra_core"
+path = "src/lib.rs"
+
+[dependencies]
+rand.workspace = true
+rand_chacha.workspace = true
+rand_distr.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "simulate"
+harness = false

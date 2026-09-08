@@ -1,0 +1,18 @@
+[package]
+name = "sinistra-cli"
+description = "Command-line wrapper around sinistra-core, the drift-diffusion model simulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sinistra"
+path = "src/main.rs"
+
+[dependencies]
+sinistra-core = { path = "../core" }
+clap = { version = "4", features = ["derive"] }
+csv = "1"
+anyhow = "1"
