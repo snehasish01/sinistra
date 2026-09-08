@@ -2,15 +2,16 @@
 
 A drift-diffusion model (DDM) simulator for cognitive science research.
 
-> Status: **phase 0/1** — simulation core + CLI only. No parameter fitting,
-> no Python bindings yet.
+> Status: **phase 0/1** — simulator, plus two parameter estimators
+> (closed-form EZ-diffusion and simulation-based Nelder–Mead). No Python
+> bindings yet.
 
 ## Workspace layout
 
-| Crate  | Kind    | Contents                                                          |
-| ------ | ------- | --------------------------------------------------------------- |
-| `core` | library | `Params`, `Trial`, `simulate_trial`, `simulate_n`, `ez_diffusion` |
-| `cli`  | binary  | `sinistra` — thin command-line wrapper around `core`              |
+| Crate  | Kind    | Contents                                                                        |
+| ------ | ------- | ------------------------------------------------------------------------------ |
+| `core` | library | `Params`, `Trial`, `simulate_trial`, `simulate_n`, `summary_stats`, `ez_diffusion`, `fit_simulation` |
+| `cli`  | binary  | `sinistra` — thin command-line wrapper around `core`                            |
 
 ## The model
 
@@ -54,7 +55,24 @@ cargo run -p sinistra-cli -- fit-ez --input trials.csv
 EZ assumes an unbiased start point and no across-trial parameter variability;
 it recovers `drift_rate`, `boundary_separation`, and `non_decision_time`.
 
+Or fit by simulation — Nelder–Mead (via `argmin`) minimising the gap between
+the data's `(accuracy, mean RT, RT variance)` and those same statistics from a
+fresh `simulate_n` run at each candidate. It warm-starts from the EZ estimate:
+
+```sh
+cargo run -p sinistra-cli -- fit-sim --input trials.csv --max-iters 150
+```
+
+Both estimators reduce data through the one shared `summary_stats` helper.
+The simulation fit is slower (≈0.3–2 s vs microseconds) but makes no
+closed-form approximation, so it carries no discretization bias.
+
 ## Development
+
+`[profile.test]` is set to `opt-level = 3` — the suite runs millions of
+Monte-Carlo trials and is unusably slow unoptimized.
+
+```sh
 
 ```sh
 cargo test --all

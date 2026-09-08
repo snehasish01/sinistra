@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 use anyhow::{bail, ensure, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use sinistra_core::{ez_diffusion, simulate_n, Params, Trial};
+use sinistra_core::{
+    default_fit_guess, ez_diffusion, fit_simulation, simulate_n, Params, Trial, FIT_N_PER_EVAL,
+};
 
 #[derive(Parser)]
 #[command(name = "sinistra", version, about = "Drift-diffusion model simulator")]
@@ -19,6 +21,8 @@ enum Command {
     Simulate(SimulateArgs),
     /// Recover DDM parameters from a (choice, rt) CSV via EZ-diffusion.
     FitEz(FitEzArgs),
+    /// Recover DDM parameters by simulation-based Nelder-Mead fitting.
+    FitSim(FitSimArgs),
 }
 
 #[derive(Args)]
@@ -59,10 +63,22 @@ struct FitEzArgs {
     input: PathBuf,
 }
 
+#[derive(Args)]
+struct FitSimArgs {
+    /// Input CSV with a header and columns: choice (upper|lower), rt (seconds).
+    #[arg(long)]
+    input: PathBuf,
+
+    /// Nelder-Mead iteration budget (~100-200 is plenty for 3 parameters).
+    #[arg(long, default_value_t = 150)]
+    max_iters: usize,
+}
+
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Simulate(args) => run_simulate(args),
         Command::FitEz(args) => run_fit_ez(args),
+        Command::FitSim(args) => run_fit_sim(args),
     }
 }
 
@@ -108,9 +124,12 @@ fn filter_completed(trials: Vec<Trial>) -> (Vec<Trial>, usize) {
     (completed, excluded)
 }
 
-fn run_fit_ez(args: FitEzArgs) -> Result<()> {
-    let mut reader = csv::Reader::from_path(&args.input)
-        .with_context(|| format!("opening {}", args.input.display()))?;
+/// Read a `(choice, rt)` CSV (with header) into trials. Rows loaded from disk
+/// are completed trials by construction (`simulate` never writes timed-out
+/// ones), so `timed_out` is always `false`.
+fn read_trials_csv(path: &PathBuf) -> Result<Vec<Trial>> {
+    let mut reader =
+        csv::Reader::from_path(path).with_context(|| format!("opening {}", path.display()))?;
 
     let mut trials = Vec::new();
     for (row, result) in reader.records().enumerate() {
@@ -135,16 +154,42 @@ fn run_fit_ez(args: FitEzArgs) -> Result<()> {
             timed_out: false,
         });
     }
-    ensure!(!trials.is_empty(), "no trials in {}", args.input.display());
+    ensure!(!trials.is_empty(), "no trials in {}", path.display());
+    Ok(trials)
+}
 
-    let params = ez_diffusion(&trials).map_err(|e| anyhow::anyhow!("EZ-diffusion failed: {e}"))?;
-
-    println!("recovered parameters ({} trials):", trials.len());
+fn print_params(params: &Params) {
     println!("  drift_rate          {:.6}", params.drift_rate);
     println!("  boundary_separation {:.6}", params.boundary_separation);
     println!("  starting_point      {:.6}", params.starting_point);
     println!("  non_decision_time   {:.6}", params.non_decision_time);
     println!("  noise_sd            {:.6}", params.noise_sd);
+}
+
+fn run_fit_ez(args: FitEzArgs) -> Result<()> {
+    let trials = read_trials_csv(&args.input)?;
+    let params = ez_diffusion(&trials).map_err(|e| anyhow::anyhow!("EZ-diffusion failed: {e}"))?;
+
+    println!("recovered parameters ({} trials):", trials.len());
+    print_params(&params);
+    Ok(())
+}
+
+fn run_fit_sim(args: FitSimArgs) -> Result<()> {
+    let trials = read_trials_csv(&args.input)?;
+
+    let guess = default_fit_guess(&trials);
+    let started = std::time::Instant::now();
+    let fit = fit_simulation(&trials, guess, args.max_iters)
+        .map_err(|e| anyhow::anyhow!("simulation fit failed: {e}"))?;
+    let elapsed = started.elapsed();
+
+    println!("recovered parameters ({} trials):", trials.len());
+    print_params(&fit.params);
+    println!(
+        "  [{} Nelder-Mead iterations, {} trials/eval, final cost {:.3e}, {:.2?}]",
+        fit.iterations, FIT_N_PER_EVAL, fit.final_cost, elapsed
+    );
     Ok(())
 }
 

@@ -36,6 +36,8 @@
 //! reached; if you see response times clustered exactly at
 //! `MAX_SIM_TIME + non_decision_time`, your parameters are degenerate.
 
+use argmin::core::{CostFunction, Error as ArgminError, Executor, State};
+use argmin::solver::neldermead::NelderMead;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rand_distr::StandardNormal;
@@ -189,11 +191,77 @@ pub fn simulate_n(params: &Params, n: usize, seed: u64) -> Vec<Trial> {
         .collect()
 }
 
-/// Scaling parameter (within-trial noise SD) assumed by [`ez_diffusion`].
+/// The three summary statistics both estimators ([`ez_diffusion`],
+/// [`fit_simulation`]) reduce a data set to. Computed by [`summary_stats`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SummaryStats {
+    /// `Pc`: proportion of usable trials that hit the **upper** boundary
+    /// (treated as the "correct" response).
+    pub accuracy: f64,
+    /// `MRT`: mean RT, in seconds, of the upper-boundary ("correct") trials.
+    pub mean_rt: f64,
+    /// `VRT`: sample variance (`/(m-1)`) of the upper-boundary trials' RT.
+    pub var_rt: f64,
+    /// Number of trials that were not timed out (the denominator of `accuracy`).
+    pub n_usable: usize,
+    /// Number of upper-boundary trials (the sample behind `mean_rt`/`var_rt`).
+    pub n_correct: usize,
+}
+
+/// Reduce choice-RT data to the `(Pc, MRT, VRT)` triple used by every
+/// estimator in this crate. This is the single source of truth for those
+/// statistics.
+///
+/// * Timed-out trials ([`Trial::timed_out`]) are excluded entirely.
+/// * `accuracy` is over all remaining ("usable") trials.
+/// * `mean_rt` and `var_rt` are over the **upper-boundary** trials only, per
+///   the EZ-diffusion convention (Wagenmakers et al., 2007). For the unbiased
+///   model the correct- and error-RT distributions coincide, so this is not a
+///   modelling choice so much as a convention; it does make the RT moments
+///   noisier when the upper boundary is the minority response.
+///
+/// Returns `None` when the statistics are undefined: no usable trials, or
+/// fewer than two upper-boundary trials (so the sample variance has no
+/// denominator).
+pub fn summary_stats(trials: &[Trial]) -> Option<SummaryStats> {
+    let n_usable = trials.iter().filter(|t| !t.timed_out).count();
+    if n_usable == 0 {
+        return None;
+    }
+
+    let correct_rts: Vec<f64> = trials
+        .iter()
+        .filter(|t| !t.timed_out && t.upper_boundary)
+        .map(|t| t.rt)
+        .collect();
+    let n_correct = correct_rts.len();
+    if n_correct < 2 {
+        return None;
+    }
+
+    let m = n_correct as f64;
+    let mean_rt = correct_rts.iter().sum::<f64>() / m;
+    let var_rt = correct_rts
+        .iter()
+        .map(|rt| (rt - mean_rt).powi(2))
+        .sum::<f64>()
+        / (m - 1.0);
+
+    Some(SummaryStats {
+        accuracy: n_correct as f64 / n_usable as f64,
+        mean_rt,
+        var_rt,
+        n_usable,
+        n_correct,
+    })
+}
+
+/// Scaling parameter (within-trial noise SD) assumed by [`ez_diffusion`] and
+/// [`fit_simulation`].
 ///
 /// The EZ equations are invariant to the choice of `s` as long as it matches
 /// the data-generating process. This crate's simulator uses `noise_sd = 1.0`
-/// by default ([`Params::new`], [`Params::default`]), so the estimator assumes
+/// by default ([`Params::new`], [`Params::default`]), so the estimators assume
 /// the same. Wagenmakers et al. (2007) instead fix `s = 0.1`; recovered
 /// `drift_rate` and `boundary_separation` scale linearly with `s`.
 pub const EZ_SCALING_S: f64 = 1.0;
@@ -297,33 +365,27 @@ pub fn ez_diffusion(trials: &[Trial]) -> Result<Params, EzError> {
         return Err(EzError::NotEnoughTrials(n_usable));
     }
 
-    let n_upper = trials
-        .iter()
-        .filter(|t| !t.timed_out && t.upper_boundary)
-        .count();
-    let mut pc = n_upper as f64 / n_usable as f64;
+    let stats = summary_stats(trials).ok_or_else(|| {
+        let n_correct = trials
+            .iter()
+            .filter(|t| !t.timed_out && t.upper_boundary)
+            .count();
+        EzError::NotEnoughCorrect(n_correct)
+    })?;
 
-    // Edge correction (Wagenmakers et al., 2007, p. 9).
-    if pc == 0.0 {
-        pc = 1.0 / (2.0 * n_usable as f64);
-    } else if pc == 1.0 {
+    let mut pc = stats.accuracy;
+
+    // Edge correction (Wagenmakers et al., 2007, p. 9). `Pc == 0` cannot occur
+    // here: it would mean zero correct RTs, which `summary_stats` already
+    // rejects as `NotEnoughCorrect`.
+    if pc == 1.0 {
         pc = 1.0 - 1.0 / (2.0 * n_usable as f64);
     } else if pc == 0.5 {
         return Err(EzError::ChancePerformance);
     }
 
-    // Mean and variance of correct (upper-boundary) RT.
-    let correct_rts: Vec<f64> = trials
-        .iter()
-        .filter(|t| !t.timed_out && t.upper_boundary)
-        .map(|t| t.rt)
-        .collect();
-    if correct_rts.len() < 2 {
-        return Err(EzError::NotEnoughCorrect(correct_rts.len()));
-    }
-    let m = correct_rts.len() as f64;
-    let mrt = correct_rts.iter().sum::<f64>() / m;
-    let vrt = correct_rts.iter().map(|rt| (rt - mrt).powi(2)).sum::<f64>() / (m - 1.0);
+    let mrt = stats.mean_rt;
+    let vrt = stats.var_rt;
     if vrt.is_nan() || vrt <= 0.0 {
         return Err(EzError::NonPositiveVariance);
     }
@@ -354,6 +416,289 @@ pub fn ez_diffusion(trials: &[Trial]) -> Result<Params, EzError> {
         non_decision_time: ter,
         noise_sd: s,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Simulation-based fitter (Nelder–Mead over summary statistics)
+// ---------------------------------------------------------------------------
+
+/// Number of trials simulated per objective-function evaluation in
+/// [`fit_simulation`].
+///
+/// This is the main speed/accuracy knob. Each Nelder–Mead step evaluates the
+/// objective once or twice, and a fit takes ~150–300 evaluations, so the cost
+/// of a fit is roughly `250 * FIT_N_PER_EVAL` simulated trials.
+///
+/// * **Noise.** The objective compares simulated `(Pc, MRT, VRT)` against the
+///   data's. The per-evaluation Monte-Carlo error on those falls as
+///   `1/sqrt(n)`: at `n = 5000`, `SE(Pc) ≈ 0.006`, `SE(MRT)/MRT ≈ 0.5%`,
+///   `SE(VRT)/VRT ≈ 2–3%`. Because every evaluation reuses the same RNG seed
+///   (common random numbers, see [`fit_simulation`]), the objective is a
+///   *deterministic* surface and the noise that matters is its ruggedness, not
+///   the raw SE — 5000 is enough to keep the surface smooth enough for
+///   Nelder–Mead near the optimum.
+/// * **Speed.** 5000 trials is ~1 ms (release, parallelised), keeping a whole
+///   fit well under a second. `n = 1000` makes the surface too rugged and the
+///   simplex stalls; `n = 50_000` gives ~3x less noise for 10x the time and
+///   barely moves the estimate once the search is warm-started near the truth.
+///
+/// 5000 is the knee of that trade-off and the recommended default.
+pub const FIT_N_PER_EVAL: usize = 5_000;
+
+/// The RNG seed used for *every* objective evaluation within one
+/// [`fit_simulation`] call (common random numbers): holding it fixed makes the
+/// objective a deterministic surface, which Nelder–Mead requires — it has no
+/// defense against a stochastic objective.
+///
+/// The seed is *derived from the target statistics* rather than being a global
+/// constant. Each evaluation's 5000-trial simulation deviates from its
+/// expectation by one particular noise draw, and the fitted parameters absorb
+/// whatever offset compensates for it. A global constant would make that
+/// offset point the *same way* for every data set (a spurious directional
+/// bias); keying the seed to the data instead scatters it, so across data sets
+/// the error is mean-zero. The fit stays fully deterministic given
+/// `(trials, initial_guess, max_iters)`.
+fn fit_eval_seed(stats: &SummaryStats) -> u64 {
+    // splitmix64-style bit mixer over the data summary.
+    let mut h: u64 = 0x9E37_79B9_7F4A_7C15;
+    for x in [
+        stats.accuracy.to_bits(),
+        stats.mean_rt.to_bits(),
+        stats.var_rt.to_bits(),
+        stats.n_usable as u64,
+        stats.n_correct as u64,
+    ] {
+        h = (h ^ x).wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+        h ^= h >> 33;
+    }
+    h.wrapping_mul(0xC4CE_B9FE_1A85_EC53)
+}
+
+/// Relative weights on the squared relative errors of `(Pc, MRT, VRT)` in the
+/// [`fit_simulation`] objective. Using *relative* errors already removes the
+/// raw-scale differences between the three; `VRT` is additionally halved
+/// because the sample variance carries roughly twice the relative sampling
+/// error of the sample mean, so equal weighting would let `VRT` noise steer
+/// the search.
+const FIT_WEIGHTS: [f64; 3] = [1.0, 1.0, 0.5];
+
+/// Reasons [`fit_simulation`] cannot return an estimate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FitError {
+    /// [`summary_stats`] of the target data is undefined (no usable trials, or
+    /// fewer than two upper-boundary trials).
+    NoData,
+    /// The optimizer ran but produced no best parameter vector.
+    NoSolution,
+    /// The optimizer returned an error.
+    Solver(String),
+}
+
+impl std::fmt::Display for FitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FitError::NoData => write!(
+                f,
+                "target data has no usable trials or fewer than two upper-boundary trials"
+            ),
+            FitError::NoSolution => write!(f, "optimizer produced no solution"),
+            FitError::Solver(msg) => write!(f, "optimizer error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for FitError {}
+
+/// Sum-of-squared-relative-differences objective between a candidate parameter
+/// vector `[drift_rate, boundary_separation, non_decision_time]` and the target
+/// summary statistics. `starting_point` is fixed at `0.5` and `noise_sd` at
+/// [`EZ_SCALING_S`], matching the model both estimators assume.
+#[derive(Clone)]
+struct SimFitCost {
+    target: SummaryStats,
+    n_per_eval: usize,
+    seed: u64,
+}
+
+impl CostFunction for SimFitCost {
+    type Param = Vec<f64>;
+    type Output = f64;
+
+    fn cost(&self, p: &Self::Param) -> Result<Self::Output, ArgminError> {
+        let (v, a, t0) = (p[0], p[1], p[2]);
+
+        // Nelder–Mead searches unconstrained R^3; fence off the invalid region
+        // with a large finite penalty rather than an error.
+        if !v.is_finite() || !a.is_finite() || !t0.is_finite() || a <= 1e-6 || t0 < 0.0 {
+            return Ok(1e9);
+        }
+
+        let params = Params {
+            drift_rate: v,
+            boundary_separation: a,
+            starting_point: 0.5,
+            non_decision_time: t0,
+            noise_sd: EZ_SCALING_S,
+        };
+        let trials = simulate_n(&params, self.n_per_eval, self.seed);
+
+        let Some(cand) = summary_stats(&trials) else {
+            return Ok(1e9);
+        };
+
+        let sq_rel = |c: f64, t: f64| {
+            let d = (c - t) / t;
+            d * d
+        };
+        let cost = FIT_WEIGHTS[0] * sq_rel(cand.accuracy, self.target.accuracy)
+            + FIT_WEIGHTS[1] * sq_rel(cand.mean_rt, self.target.mean_rt)
+            + FIT_WEIGHTS[2] * sq_rel(cand.var_rt, self.target.var_rt);
+
+        Ok(cost)
+    }
+}
+
+/// The result of a [`fit_simulation`] run: the recovered parameters plus a
+/// little diagnostic detail about the search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimFit {
+    /// Recovered parameters (`starting_point = 0.5`, `noise_sd` =
+    /// [`EZ_SCALING_S`]).
+    pub params: Params,
+    /// Number of Nelder–Mead iterations performed.
+    pub iterations: u64,
+    /// Objective value at `params` (weighted sum of squared relative errors
+    /// in `Pc`, `MRT`, `VRT`).
+    pub final_cost: f64,
+}
+
+/// A reasonable starting point for [`fit_simulation`]: the closed-form
+/// [`ez_diffusion`] estimate when it succeeds, otherwise a neutral default.
+///
+/// This is a deliberate design choice — EZ is essentially free (a handful of
+/// `ln`/`exp` calls) and lands close enough to the truth that the expensive
+/// simulation search only has to polish it, cutting the iteration count
+/// several-fold versus a cold start.
+pub fn default_fit_guess(trials: &[Trial]) -> Params {
+    ez_diffusion(trials).unwrap_or_else(|_| Params::new(1.0, 1.0, 0.5, 0.2))
+}
+
+/// Recover DDM parameters by **simulation-based fitting**: minimise, with
+/// Nelder–Mead, the discrepancy between the data's `(Pc, MRT, VRT)` and those
+/// same statistics computed from a fresh [`simulate_n`] run at the candidate
+/// parameters.
+///
+/// Unlike [`ez_diffusion`] this makes no closed-form approximation — the
+/// forward model *is* the simulator — so it has no analogue of EZ's
+/// discretisation-driven bias (the `dt` overshoot affects the candidate and
+/// the data identically and cancels). Its error is instead optimizer
+/// convergence plus the Monte-Carlo noise of each evaluation (see
+/// [`FIT_N_PER_EVAL`]).
+///
+/// Three parameters are fitted: `drift_rate`, `boundary_separation`,
+/// `non_decision_time`. `starting_point` is held at `0.5` and `noise_sd` at
+/// [`EZ_SCALING_S`].
+///
+/// # Arguments
+///
+/// * `initial_guess` — where the simplex is centred. Pass
+///   [`default_fit_guess`] (the EZ estimate) unless you have something better;
+///   warm-starting from the cheap closed-form fit is the intended use.
+/// * `max_iters` — total Nelder–Mead iteration budget. ~100–200 is plenty for
+///   this 3-parameter problem. The budget is split across two rounds: an
+///   initial search, then one simplex restart around the best point found (a
+///   standard guard against the simplex collapsing prematurely onto a ridge of
+///   the slightly rugged Monte-Carlo objective).
+///
+/// # Determinism
+///
+/// Every objective evaluation uses one RNG seed derived from the data (see
+/// [`fit_eval_seed`]), so the whole fit is deterministic given
+/// `(trials, initial_guess, max_iters)`. The estimate is conditioned on that
+/// single noise realisation of the evaluation simulator; averaging over seeds
+/// would cut its variance at proportional cost.
+pub fn fit_simulation(
+    trials: &[Trial],
+    initial_guess: Params,
+    max_iters: usize,
+) -> Result<SimFit, FitError> {
+    let target = summary_stats(trials).ok_or(FitError::NoData)?;
+
+    let cost = SimFitCost {
+        target,
+        n_per_eval: FIT_N_PER_EVAL,
+        seed: fit_eval_seed(&target),
+    };
+
+    let g = [
+        initial_guess.drift_rate,
+        initial_guess.boundary_separation,
+        initial_guess.non_decision_time,
+    ];
+
+    // Round 1: ~55% of the budget from a simplex around the guess.
+    let round1_iters = (max_iters * 55 / 100).max(1) as u64;
+    let (mut best, mut best_cost, mut iters) =
+        run_neldermead(cost.clone(), simplex_around(&g, 0.15, 0.05), round1_iters)?;
+
+    // Round 2: the remainder, restarting from round 1's best with a tighter
+    // simplex.
+    let round2_iters = (max_iters as u64).saturating_sub(iters).max(1);
+    let (b2, c2, i2) = run_neldermead(cost, simplex_around(&best, 0.05, 0.02), round2_iters)?;
+    iters += i2;
+    if c2 < best_cost {
+        best = b2;
+        best_cost = c2;
+    }
+
+    Ok(SimFit {
+        params: Params {
+            drift_rate: best[0],
+            boundary_separation: best[1],
+            starting_point: 0.5,
+            non_decision_time: best[2],
+            noise_sd: EZ_SCALING_S,
+        },
+        iterations: iters,
+        final_cost: best_cost,
+    })
+}
+
+/// A 4-vertex simplex around `center`: the point itself, plus one vertex per
+/// axis stepped by `frac` of that coordinate's magnitude (floored at `floor`
+/// so a near-zero coordinate still spreads).
+fn simplex_around(center: &[f64; 3], frac: f64, floor: f64) -> Vec<Vec<f64>> {
+    let step = |v: f64| (v.abs() * frac).max(floor);
+    vec![
+        center.to_vec(),
+        vec![center[0] + step(center[0]), center[1], center[2]],
+        vec![center[0], center[1] + step(center[1]), center[2]],
+        vec![center[0], center[1], center[2] + floor.max(0.05)],
+    ]
+}
+
+/// Run Nelder–Mead once and return `(best_param, best_cost, iterations)`.
+fn run_neldermead(
+    cost: SimFitCost,
+    simplex: Vec<Vec<f64>>,
+    max_iters: u64,
+) -> Result<([f64; 3], f64, u64), FitError> {
+    let solver = NelderMead::new(simplex)
+        .with_sd_tolerance(1e-10)
+        .map_err(|e| FitError::Solver(e.to_string()))?;
+
+    let result = Executor::new(cost, solver)
+        .configure(|state| state.max_iters(max_iters))
+        .run()
+        .map_err(|e| FitError::Solver(e.to_string()))?;
+
+    let state = result.state();
+    let best = state.get_best_param().ok_or(FitError::NoSolution)?;
+    Ok((
+        [best[0], best[1], best[2]],
+        state.get_best_cost(),
+        state.get_iter(),
+    ))
 }
 
 #[cfg(test)]
@@ -609,5 +954,149 @@ mod tests {
         assert!((clean.drift_rate - with_junk.drift_rate).abs() < 1e-12);
         assert!((clean.boundary_separation - with_junk.boundary_separation).abs() < 1e-12);
         assert!((clean.non_decision_time - with_junk.non_decision_time).abs() < 1e-12);
+    }
+
+    #[test]
+    fn summary_stats_are_correct_and_exclude_timeouts() {
+        let trials = vec![
+            Trial {
+                upper_boundary: true,
+                rt: 0.5,
+                timed_out: false,
+            },
+            Trial {
+                upper_boundary: true,
+                rt: 0.7,
+                timed_out: false,
+            },
+            Trial {
+                upper_boundary: true,
+                rt: 0.9,
+                timed_out: false,
+            },
+            Trial {
+                upper_boundary: false,
+                rt: 0.6,
+                timed_out: false,
+            },
+            // excluded entirely:
+            Trial {
+                upper_boundary: true,
+                rt: 10.1,
+                timed_out: true,
+            },
+            Trial {
+                upper_boundary: false,
+                rt: 10.1,
+                timed_out: true,
+            },
+        ];
+        let s = summary_stats(&trials).unwrap();
+        assert_eq!(s.n_usable, 4);
+        assert_eq!(s.n_correct, 3);
+        assert!((s.accuracy - 0.75).abs() < 1e-12);
+        assert!((s.mean_rt - 0.7).abs() < 1e-12);
+        // sample variance of {0.5, 0.7, 0.9} = 0.04
+        assert!((s.var_rt - 0.04).abs() < 1e-12);
+
+        assert!(summary_stats(&[]).is_none());
+    }
+
+    #[test]
+    fn ez_diffusion_and_summary_stats_agree() {
+        // ez_diffusion must be driven by the same statistics summary_stats reports.
+        let trials = simulate_n(&Params::new(1.3, 1.1, 0.5, 0.2), 20_000, 4);
+        let s = summary_stats(&trials).unwrap();
+        let est = ez_diffusion(&trials).unwrap();
+
+        // Re-derive Ter from the reported (v, a) and MRT; it must match.
+        let (v, a) = (est.drift_rate, est.boundary_separation);
+        let y = -v * a / (EZ_SCALING_S * EZ_SCALING_S);
+        let mdt = (a / (2.0 * v)) * ((1.0 - y.exp()) / (1.0 + y.exp()));
+        assert!((est.non_decision_time - (s.mean_rt - mdt)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fit_simulation_is_deterministic() {
+        let trials = simulate_n(&Params::new(1.2, 1.0, 0.5, 0.25), 20_000, 11);
+        let guess = default_fit_guess(&trials);
+        let a = fit_simulation(&trials, guess.clone(), 80).unwrap();
+        let b = fit_simulation(&trials, guess, 80).unwrap();
+        assert_eq!(a, b);
+    }
+
+    /// End-to-end recovery for the simulation fitter, the analogue of
+    /// `ez_diffusion_recovers_known_parameters`.
+    ///
+    /// Tolerance, reasoned from this method's error sources rather than EZ's.
+    /// The forward model here *is* the simulator, so the `dt` discretization
+    /// overshoot hits the candidate and the target identically and cancels --
+    /// there is no one-directional bias like the +3-4% EZ inherited on `a`.
+    /// The error is instead per-evaluation Monte-Carlo noise
+    /// ([`FIT_N_PER_EVAL`] = 5000 trials, one data-derived seed).
+    ///
+    /// `SE(Pc) ~ sqrt(p(1-p)/5000)`, and the fit drives candidate `Pc` to the
+    /// target within that. Since `dPc ~= p(1-p) * d(v*a/s^2)`, the relative
+    /// error this induces on `v*a` is `SE(Pc) / (p(1-p) * logit(Pc))`, which is
+    /// strongly drift-dependent: ~1.5% at `v=3, a=0.8` (`Pc ~= 0.92`), ~3% at
+    /// `v=1, a=1` (`Pc ~= 0.73`), and ~4% at `v=0.5, a=1.5` (`Pc ~= 0.68`,
+    /// nearest chance, where the `Pc -> v` map is steepest). `VRT` (shift-
+    /// invariant, no `Pc` term) anchors `a`, so most of this noise lands on
+    /// `v`. Its sign is mean-zero across data sets because the eval seed is
+    /// keyed to the data. Target sampling at `n = 150_000` adds `SE(Pc) <
+    /// 0.0013` (~4x smaller) and the optimizer resolves the minimum to <1%
+    /// (final costs ~1e-5 or below) -- both subdominant.
+    ///
+    /// So expected `|error|` on `v` is ~1.5% (high drift) to ~4% 1-sigma (the
+    /// low-drift corner here). Tolerances: `drift_rate` **8%** (~2-sigma at the
+    /// worst case -- 5% would do for `v >= 1`, the extra room is specifically
+    /// for `Pc -> v` amplification near chance, not slack); `boundary_
+    /// separation` **5%** (anchored by `VRT`, observed errors ~1-3%);
+    /// `non_decision_time` **18 ms** (`Ter = MRT - MDT(v,a)`: `SE(MRT) ~= 2-5
+    /// ms` plus `v,a` error propagating through an `MDT` of up to ~0.5 s).
+    /// This budget differs from EZ's in kind: EZ's was a one-directional
+    /// discretization allowance uniform across parameters; this is
+    /// two-directional MC noise, worst for `v` and worst still at low drift.
+    #[test]
+    fn fit_simulation_recovers_known_parameters() {
+        let truths = [
+            Params::new(1.0, 1.0, 0.5, 0.20),
+            Params::new(2.0, 1.2, 0.5, 0.30),
+            Params::new(0.5, 1.5, 0.5, 0.15),
+            Params::new(3.0, 0.8, 0.5, 0.25),
+        ];
+
+        for (k, truth) in truths.iter().enumerate() {
+            let trials = simulate_n(truth, 150_000, 2000 + k as u64);
+            let guess = default_fit_guess(&trials);
+            let fit = fit_simulation(&trials, guess, 150).expect("fit should succeed");
+            let est = fit.params;
+
+            let rel = |got: f64, want: f64| (got - want).abs() / want;
+
+            assert!(
+                rel(est.drift_rate, truth.drift_rate) < 0.08,
+                "case {k}: drift {:.4} vs true {:.4} ({:.1}%), cost {:.2e}",
+                est.drift_rate,
+                truth.drift_rate,
+                100.0 * rel(est.drift_rate, truth.drift_rate),
+                fit.final_cost,
+            );
+            assert!(
+                rel(est.boundary_separation, truth.boundary_separation) < 0.05,
+                "case {k}: boundary {:.4} vs true {:.4} ({:.1}%), cost {:.2e}",
+                est.boundary_separation,
+                truth.boundary_separation,
+                100.0 * rel(est.boundary_separation, truth.boundary_separation),
+                fit.final_cost,
+            );
+            assert!(
+                (est.non_decision_time - truth.non_decision_time).abs() < 0.018,
+                "case {k}: Ter {:.4} vs true {:.4}, cost {:.2e}",
+                est.non_decision_time,
+                truth.non_decision_time,
+                fit.final_cost,
+            );
+        }
     }
 }

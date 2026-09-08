@@ -16,6 +16,8 @@ rand.workspace = true
 rand_chacha.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true
+argmin = { version = "0.10", default-features = false }
+argmin-math = { version = "0.4", features = ["vec"] }
 
 [dev-dependencies]
 criterion = "0.5"

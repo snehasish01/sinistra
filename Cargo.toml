@@ -14,3 +14,9 @@ rand = "0.8"
 rand_chacha = "0.3"
 rand_distr = "0.4"
 rayon = "1"
+
+# The test suite runs Monte-Carlo simulations (DDM property checks, parameter
+# recovery) with millions of trials; an unoptimized build makes `cargo test`
+# take minutes. Optimize test binaries while keeping debug assertions on.
+[profile.test]
+opt-level = 3
