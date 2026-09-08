@@ -33,8 +33,9 @@ The core is Rust — trial simulation runs across all cores and is
 bit-reproducible for a given seed. There's a `sinistra` CLI and a NumPy-based
 Python module.
 
-**Status:** working and tested; not yet published to crates.io or PyPI — build
-from source (see [Quickstart](#quickstart)).
+**Status:** published — `pip install sinistra` (Python) and
+`cargo add sinistra-core` / `cargo install sinistra-cli` (Rust). See
+[Quickstart](#quickstart).
 
 ## Key results
 
@@ -104,29 +105,40 @@ motor-imagery ability) are folded into each aggregate estimate. Fine for a
 ### CLI
 
 ```sh
+cargo install sinistra-cli
+
 # Simulate 10k trials -> CSV with columns: choice (upper|lower), rt (seconds)
-cargo run --release -p sinistra-cli -- simulate \
+sinistra simulate \
   --drift 1.2 --boundary 1.0 --start 0.5 --t0 0.3 \
   --n 10000 --seed 42 --out trials.csv
 
 # Recover parameters — closed form (near-instant)
-cargo run --release -p sinistra-cli -- fit-ez --input trials.csv
+sinistra fit-ez --input trials.csv
 
 # Recover parameters — simulation search, warm-started from the EZ estimate
-cargo run --release -p sinistra-cli -- fit-sim --input trials.csv --max-iters 150
+sinistra fit-sim --input trials.csv --max-iters 150
 ```
 
-`--release` matters for `fit-sim` — an unoptimized build is tens of seconds
-instead of well under one. `simulate` writes only completed trials; any that
-hit the 10 s cap are dropped and the count is reported on stderr.
+`simulate` writes only completed trials; any that hit the 10 s cap are dropped
+and the count is reported on stderr.
 
-### Python (build from source — not yet on PyPI)
+### Rust library
 
 ```sh
-cd py
-python -m venv .venv && . .venv/bin/activate
-pip install maturin numpy
-maturin develop --release
+cargo add sinistra-core
+```
+
+```rust
+use sinistra_core::{Params, simulate_n, ez_diffusion};
+
+let trials = simulate_n(&Params::new(1.2, 1.0, 0.5, 0.25), 100_000, 42);
+let est = ez_diffusion(&trials).unwrap();
+```
+
+### Python
+
+```sh
+pip install sinistra
 ```
 
 ```python
@@ -190,6 +202,3 @@ is CC BY 4.0 (cited above).
 - **A fixed model.** `starting_point` and `noise_sd` are held at `0.5` and
   `1.0` rather than fitted, and across-trial parameter variability isn't
   modelled.
-- **Not packaged yet.** No crates.io or PyPI release — `pip install sinistra`
-  does not work today. Publishing (with a PyPI-facing rewrite of
-  `py/README.md`) is planned.
