@@ -1,11 +1,16 @@
 [package]
 name = "sinistra-core"
-description = "Core drift-diffusion model (DDM) simulation logic for cognitive science research"
+description = "Drift-diffusion model (DDM) simulator with EZ-diffusion and simulation-based parameter recovery"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/sinistra-core"
+readme = "README.md"
+keywords = ["drift-diffusion", "ddm", "cognitive-science", "simulation", "reaction-time"]
+categories = ["science::neuroscience", "simulation", "mathematics"]
 
 [lib]
 name = "sinistra_core"

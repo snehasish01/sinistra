@@ -1,82 +1,89 @@
-# sinistra (Python bindings)
+# sinistra
 
-PyO3 bindings for `sinistra-core`, built with [maturin](https://www.maturin.rs/).
-The extension targets the Python **abi3** limited API (`abi3-py39`), so one
-wheel runs on CPython 3.9+.
+Fast **drift-diffusion model** (DDM) simulation and parameter recovery,
+powered by a Rust core.
 
-## Layout
+- **`simulate(...)`** — generate choice + response-time data from a DDM.
+  ~1.5M trials/sec, returned as NumPy arrays.
+- **`fit_ez(...)`** — closed-form EZ-diffusion parameter recovery
+  (Wagenmakers, van der Maas & Grasman, 2007). Microseconds.
+- **`fit_sim(...)`** — simulation-based recovery: a Nelder–Mead search that
+  re-simulates the model at each candidate and matches its summary statistics
+  to the data. Sub-second, and makes no closed-form approximation.
 
-```
-py/
-├── Cargo.toml              cdylib + rlib, pyo3 (abi3-py39)
-├── pyproject.toml          maturin build backend
-├── src/lib.rs              the #[pymodule]
-├── python/sinistra/        pure-Python package (re-exports the compiled ext)
-├── tests/test_smoke.py     pytest binding smoke test
-├── benches/marshalling.py  simulate() throughput (not pytest)
-├── examples/recovery_plot.py  true-vs-recovered figure for both fitters
-├── examples/hljt_analysis.py  Phase 7: DDM decomposition of the HLJT biomech effect
-└── benchmarks/vs_pyddm.py  dev-only comparison against PyDDM (see its README)
-```
-
-## Build / develop
+## Install
 
 ```sh
-cd py
-python3 -m venv .venv
-source .venv/bin/activate
-pip install maturin pytest
-
-# Compile the extension and install it into the active venv (editable-ish):
-maturin develop                # debug
-maturin develop --release      # optimized — use this before benchmarking or
-                               # running fit_sim on real data
-
-pytest                         # run the smoke test
-
-# Produce a distributable wheel (lands in ../target/wheels/):
-maturin build --release
+pip install sinistra
 ```
 
-## API
+Wheels are built against the CPython limited API (abi3), so one wheel covers
+CPython 3.9+. `numpy` is the only runtime dependency.
 
-Trial data crosses as **two NumPy arrays** — `choices` (`bool`) and `rts`
-(`float64`) — not a list of tuples: at large `n` the per-trial object
-marshalling of a Python list dominates, whereas each array is one buffer copy.
-
-Parameters and fit results are plain `dict`s with keys `drift_rate`,
-`boundary_separation`, `starting_point`, `non_decision_time`, `noise_sd`
-(`fit_sim` adds `iterations`, `final_cost`).
+## Usage
 
 ```python
 import sinistra
 
+# Simulate 1,000,000 trials
 choices, rts, n_excluded = sinistra.simulate(
     drift=1.2, boundary=1.0, start=0.5, t0=0.25, n=1_000_000, seed=42
 )
-# choices : np.ndarray[bool]     -> True == hit upper boundary
-# rts     : np.ndarray[float64]  -> response time, seconds
-# n_excluded : int               -> trials that hit the 10 s cap, dropped from both arrays
+# choices    : np.ndarray[bool]     — True == upper boundary
+# rts        : np.ndarray[float64]  — response time in seconds
+# n_excluded : int                  — trials that hit the 10 s cap, dropped from both arrays
 
-ez  = sinistra.fit_ez(choices, rts)                          # -> dict
-sim = sinistra.fit_sim(choices, rts, initial_guess=ez)       # -> dict + iterations, final_cost
+# Recover the parameters two independent ways
+ez  = sinistra.fit_ez(choices, rts)
+sim = sinistra.fit_sim(choices, rts, initial_guess=ez, max_iters=200)
+
+print(ez)
+# {'drift_rate': 1.20, 'boundary_separation': 1.04, 'starting_point': 0.5,
+#  'non_decision_time': 0.25, 'noise_sd': 1.0}
 ```
 
-`fit_ez` / `fit_sim` raise `sinistra.SinistraError` (a `ValueError` subclass)
-with a specific message when the data cannot be fitted.
+### API
 
-### Throughput
+| function | returns |
+| --- | --- |
+| `simulate(drift, boundary, start, t0, n, seed, noise_sd=1.0)` | `(choices, rts, n_excluded)` |
+| `fit_ez(choices, rts)` | params `dict` |
+| `fit_sim(choices, rts, initial_guess=None, max_iters=200)` | params `dict` + `iterations`, `final_cost` |
 
-`benches/marshalling.py` (needs a `--release` build) times `simulate()` end to
-end. At `n = 1_000_000` it runs at ~1.52M trials/sec — matching the core
-`simulate_n` criterion baseline from phase 1, i.e. the NumPy boundary adds no
-measurable overhead at scale.
+Trial data crosses the boundary as **two NumPy arrays** — `choices` (`bool`,
+`True` == upper boundary) and `rts` (`float64`, seconds) — not a list of
+tuples, so large-`n` calls stay cheap.
 
-### Recovery figure
+Parameter dicts always carry the keys `drift_rate`, `boundary_separation`,
+`starting_point`, `non_decision_time`, `noise_sd`. `initial_guess` accepts a
+dict of the same shape (e.g. the output of `fit_ez`).
 
-`examples/recovery_plot.py` (needs `pip install matplotlib` and a `--release`
-build) runs a small recovery experiment (7 parameter sets × 5 replications,
-n = 50,000) through both fitters and writes `examples/recovery_plot.png` — a
-true-vs-recovered scatter that shows EZ's boundary-separation bias next to the
-simulation fit. It takes ~35–40 s (≈35 simulation fits), so the PNG is
-committed as a static asset rather than regenerated in CI.
+Data that cannot be fitted — too few trials, zero RT variance, chance-level
+accuracy — raises `sinistra.SinistraError` (a subclass of `ValueError`) with a
+specific message.
+
+## The model
+
+Each trial integrates `dx = drift_rate·dt + noise_sd·√dt·N(0,1)`
+(Euler–Maruyama, `dt = 1 ms`) from `starting_point · boundary_separation`
+until it reaches `0` or `boundary_separation`; `non_decision_time` is added to
+the crossing time. Trials are capped at 10 s of simulated time. `noise_sd` is
+conventionally fixed at `1.0`; `fit_ez` and `fit_sim` recover `drift_rate`,
+`boundary_separation` and `non_decision_time`.
+
+`simulate()` is parallel and deterministic given a seed (each trial draws from
+its own ChaCha8 cipher stream, independent of thread count).
+
+## Building from source
+
+```sh
+pip install maturin
+maturin develop --release      # build + install into the active virtualenv
+# or:  maturin build --release  # produce a wheel in target/wheels/
+```
+
+A Rust toolchain is required (https://rustup.rs).
+
+## License
+
+MIT. Source and full documentation: https://github.com/snehasish01/sinistra

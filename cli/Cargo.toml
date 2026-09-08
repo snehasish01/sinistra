@@ -1,18 +1,22 @@
 [package]
 name = "sinistra-cli"
-description = "Command-line wrapper around sinistra-core, the drift-diffusion model simulator"
+description = "Command-line drift-diffusion model simulator and parameter fitter (sinistra-core CLI)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["drift-diffusion", "ddm", "cognitive-science", "simulation", "cli"]
+categories = ["command-line-utilities", "science::neuroscience", "simulation"]
 
 [[bin]]
 name = "sinistra"
 path = "src/main.rs"
 
 [dependencies]
-sinistra-core = { path = "../core" }
+sinistra-core = { path = "../core", version = "0.1.0" }
 clap = { version = "4", features = ["derive"] }
 csv = "1"
 anyhow = "1"
