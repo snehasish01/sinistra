@@ -7,10 +7,10 @@ A drift-diffusion model (DDM) simulator for cognitive science research.
 
 ## Workspace layout
 
-| Crate  | Kind    | Contents                                             |
-| ------ | ------- | --------------------------------------------------- |
-| `core` | library | `Params`, `Trial`, `simulate_trial`, `simulate_n`   |
-| `cli`  | binary  | `sinistra` — thin command-line wrapper around `core` |
+| Crate  | Kind    | Contents                                                          |
+| ------ | ------- | --------------------------------------------------------------- |
+| `core` | library | `Params`, `Trial`, `simulate_trial`, `simulate_n`, `ez_diffusion` |
+| `cli`  | binary  | `sinistra` — thin command-line wrapper around `core`              |
 
 ## The model
 
@@ -40,6 +40,19 @@ cargo run -p sinistra-cli -- simulate \
 ```
 
 Output CSV has columns `choice` (`upper` / `lower`) and `rt` (seconds).
+Trials that hit the `MAX_SIM_TIME` cap are dropped before writing; the count
+is reported on stderr (`excluded N timed-out trials (of TOTAL)`), so the CSV
+only ever holds completed trials.
+
+Recover parameters from such a CSV with EZ-diffusion (Wagenmakers, van der
+Maas & Grasman, 2007):
+
+```sh
+cargo run -p sinistra-cli -- fit-ez --input trials.csv
+```
+
+EZ assumes an unbiased start point and no across-trial parameter variability;
+it recovers `drift_rate`, `boundary_separation`, and `non_decision_time`.
 
 ## Development
 
