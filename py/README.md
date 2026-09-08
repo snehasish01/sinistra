@@ -15,6 +15,7 @@ py/
 ├── tests/test_smoke.py     pytest binding smoke test
 ├── benches/marshalling.py  simulate() throughput (not pytest)
 ├── examples/recovery_plot.py  true-vs-recovered figure for both fitters
+├── examples/hljt_analysis.py  Phase 7: DDM decomposition of the HLJT biomech effect
 └── benchmarks/vs_pyddm.py  dev-only comparison against PyDDM (see its README)
 ```
 
