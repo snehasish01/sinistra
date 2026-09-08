@@ -1,102 +1,195 @@
 # sinistra
 
-A drift-diffusion model (DDM) simulator for cognitive science research.
+**Simulate the drift-diffusion model and recover its parameters — closed-form
+and by brute-force simulation — in Rust, with Python bindings.**
 
-> Status: simulator + two parameter estimators (closed-form EZ-diffusion and
-> simulation-based Nelder–Mead) + Python bindings.
+I have never been able to tell left from right without a beat of conscious
+effort. The *hand laterality judgement task* — shown a rotated hand, decide
+whether it's a left or a right — is one of the ways cognitive scientists put a
+number on exactly that kind of covert mental work, and a real dataset from it
+is what this project ends up analysing. `sinistra` is the Latin word for
+"left."
 
-## Workspace layout
+## What it is
 
-| Crate  | Kind    | Contents                                                                        |
-| ------ | ------- | ------------------------------------------------------------------------------ |
-| `core` | library | `Params`, `Trial`, `simulate_trial`, `simulate_n`, `summary_stats`, `ez_diffusion`, `fit_simulation` |
-| `cli`  | binary  | `sinistra` — thin command-line wrapper around `core`                            |
-| `py`   | cdylib  | PyO3 bindings (`import sinistra`), built with maturin — see [py/README.md](py/README.md) |
+`sinistra` implements the **drift-diffusion model** (DDM), the standard
+account of fast two-alternative decisions: evidence accumulates noisily from a
+starting point until it reaches one of two boundaries. Each trial is an
+Euler–Maruyama integration of `dx = drift_rate·dt + noise_sd·√dt·N(0,1)`;
+`non_decision_time` is added to the crossing time to give the response time.
 
-## The model
+It recovers the model's parameters from choice + response-time data **two
+independent ways**:
 
-Each trial integrates a 1-D diffusion process with the Euler–Maruyama scheme
-(`dt = 0.001 s`):
+- **EZ-diffusion** (Wagenmakers, van der Maas & Grasman, 2007) — a closed-form
+  inversion of three summary statistics. Microseconds, but relies on
+  approximating assumptions.
+- **Simulation-based fitting** — a Nelder–Mead search that re-simulates the
+  model at each candidate and matches its `(accuracy, mean RT, RT variance)` to
+  the data's. Sub-second, and makes no closed-form approximation because the
+  forward model *is* the simulator.
 
-```text
-dx = drift_rate * dt + noise_sd * sqrt(dt) * N(0, 1)
-```
+The core is Rust — trial simulation runs across all cores and is
+bit-reproducible for a given seed. There's a `sinistra` CLI and a NumPy-based
+Python module.
 
-starting at `starting_point * boundary_separation` and running until `x`
-reaches `0` (lower response) or `boundary_separation` (upper response).
-`non_decision_time` is added to the elapsed time to give the response time.
-A trial is force-terminated after `MAX_SIM_TIME = 10 s` of simulated time to
-guard against degenerate parameters.
+**Status:** working and tested; not yet published to crates.io or PyPI — build
+from source (see [Quickstart](#quickstart)).
 
-`simulate_n` runs trials in parallel with rayon and is deterministic given a
-seed: trial `i` uses a ChaCha8 RNG on cipher stream `i`, independent of
-thread count.
+## Key results
 
-## Usage
+### Core throughput — ~1.52M trials/sec
+
+`simulate_n` parallelises trials with rayon and stays deterministic given a
+seed (each trial draws from its own ChaCha8 cipher stream, independent of
+thread count). The criterion benchmark
+([`core/benches/simulate.rs`](core/benches/simulate.rs), `cargo bench -p
+sinistra-core`) measures **~1.52M trials/sec at n = 1,000,000**. The Python
+`simulate()` reaches the same figure — the NumPy-array boundary adds no
+measurable marshalling overhead at scale.
+
+### Parameter recovery — the two estimators agree, and EZ's bias is visible
+
+![true vs recovered parameters for both estimators](py/examples/recovery_plot.png)
+
+Seven true parameter sets × five replications at n = 50,000, recovered by both
+methods. They track each other closely across drift rate, boundary separation
+and non-decision time. The one systematic difference: **EZ over-estimates
+boundary separation by ~3–4%** — a discretization artifact it inherits from
+the simulator's finite `dt` — which the simulation fit does not have (orange
+points sitting above the diagonal in the middle panel). The tolerances and
+their first-principles derivation live in the test doc comments in
+[`core/src/lib.rs`](core/src/lib.rs)
+(`ez_diffusion_recovers_known_parameters`,
+`fit_simulation_recovers_known_parameters`).
+
+### vs PyDDM — far faster at raw simulation, roughly at parity on time-to-a-fit
+
+![raw simulation throughput: sinistra vs PyDDM](py/benchmarks/vs_pyddm_simulation.png)
+
+PyDDM does ship a genuine trial-by-trial simulator, but its docs call it a
+debugging helper — PyDDM's real engine is a Fokker–Planck PDE solver that never
+simulates paths. Against that trial simulator, `sinistra` is
+**~24,000–40,000× faster** at generating raw trials.
+
+![time to a fitted estimate: sinistra vs PyDDM](py/benchmarks/vs_pyddm_fit.png)
+
+For what people actually do — reach a parameter estimate — it's roughly a
+wash: `sinistra.fit_sim` ≈ 0.8 s vs PyDDM's `Model.fit` ≈ 0.6 s on the same
+10,000-trial data set, using different algorithms (Monte-Carlo search vs
+PDE + likelihood). Fairness notes and the full method are in
+[`py/benchmarks/README.md`](py/benchmarks/README.md). This is a dev-only
+comparison; PyDDM is not a dependency.
+
+### Real data — the biomechanical-constraints effect is a *drift-rate* effect
+
+![HLJT biomechanical-constraints effect decomposed by DDM parameter](py/examples/hljt_recovery.png)
+
+Fitting a DDM to each design cell of a real, public hand-laterality dataset:
+laterally-rotated hand stimuli (anatomically harder to imagine moving) are
+judged ~6 percentage points less accurately and ~90 ms slower than
+medially-rotated ones. Decomposed, that difference is **almost entirely a drop
+in drift rate (~−24%)** — not a change in the decision boundary (~−3%, and not
+robust across method or view) or in non-decision time (~+60 ms, a secondary
+effect). EZ and the simulation fit agree.
+
+Caveat: one DDM is fit per cell to trials **pooled across all participants**,
+not a hierarchical per-subject model — individual differences (e.g.
+motor-imagery ability) are folded into each aggregate estimate. Fine for a
+"which parameter moves" question; see
+[`py/examples/hljt_analysis.py`](py/examples/hljt_analysis.py).
+
+## Quickstart
+
+### CLI
 
 ```sh
-cargo run -p sinistra-cli -- simulate \
+# Simulate 10k trials -> CSV with columns: choice (upper|lower), rt (seconds)
+cargo run --release -p sinistra-cli -- simulate \
   --drift 1.2 --boundary 1.0 --start 0.5 --t0 0.3 \
   --n 10000 --seed 42 --out trials.csv
+
+# Recover parameters — closed form (near-instant)
+cargo run --release -p sinistra-cli -- fit-ez --input trials.csv
+
+# Recover parameters — simulation search, warm-started from the EZ estimate
+cargo run --release -p sinistra-cli -- fit-sim --input trials.csv --max-iters 150
 ```
 
-Output CSV has columns `choice` (`upper` / `lower`) and `rt` (seconds).
-Trials that hit the `MAX_SIM_TIME` cap are dropped before writing; the count
-is reported on stderr (`excluded N timed-out trials (of TOTAL)`), so the CSV
-only ever holds completed trials.
+`--release` matters for `fit-sim` — an unoptimized build is tens of seconds
+instead of well under one. `simulate` writes only completed trials; any that
+hit the 10 s cap are dropped and the count is reported on stderr.
 
-Recover parameters from such a CSV with EZ-diffusion (Wagenmakers, van der
-Maas & Grasman, 2007):
+### Python (build from source — not yet on PyPI)
 
 ```sh
-cargo run -p sinistra-cli -- fit-ez --input trials.csv
+cd py
+python -m venv .venv && . .venv/bin/activate
+pip install maturin numpy
+maturin develop --release
 ```
-
-EZ assumes an unbiased start point and no across-trial parameter variability;
-it recovers `drift_rate`, `boundary_separation`, and `non_decision_time`.
-
-Or fit by simulation — Nelder–Mead (via `argmin`) minimising the gap between
-the data's `(accuracy, mean RT, RT variance)` and those same statistics from a
-fresh `simulate_n` run at each candidate. It warm-starts from the EZ estimate:
-
-```sh
-cargo run -p sinistra-cli -- fit-sim --input trials.csv --max-iters 150
-```
-
-Both estimators reduce data through the one shared `summary_stats` helper.
-The simulation fit is slower (≈0.3–2 s vs microseconds) but makes no
-closed-form approximation, so it carries no discretization bias.
-
-### Python
 
 ```python
 import sinistra
-choices, rts, n_excluded = sinistra.simulate(drift=1.2, boundary=1.0, start=0.5,
-                                             t0=0.25, n=1_000_000, seed=42)
-# choices: np.ndarray[bool], rts: np.ndarray[float64]
-ez  = sinistra.fit_ez(choices, rts)
-sim = sinistra.fit_sim(choices, rts, initial_guess=ez, max_iters=200)
+
+choices, rts, n_excluded = sinistra.simulate(
+    drift=1.2, boundary=1.0, start=0.5, t0=0.25, n=1_000_000, seed=42
+)
+# choices: np.ndarray[bool]     (True == upper boundary)
+# rts:     np.ndarray[float64]  (seconds)
+
+ez  = sinistra.fit_ez(choices, rts)                    # -> dict
+sim = sinistra.fit_sim(choices, rts, initial_guess=ez) # -> dict + iterations, final_cost
 ```
 
-`simulate()` runs at ~1.52M trials/sec from Python — matching the Rust core
-benchmark (NumPy arrays, no per-trial marshalling).
+Parameter dicts use the keys `drift_rate`, `boundary_separation`,
+`starting_point`, `non_decision_time`, `noise_sd`. Unfittable data raises
+`sinistra.SinistraError`. See [`py/README.md`](py/README.md) for more.
 
-Build with maturin — see [py/README.md](py/README.md).
-
-## Development
-
-`[profile.test]` is set to `opt-level = 3` — the suite runs millions of
-Monte-Carlo trials and is unusably slow unoptimized.
+### Tests and benchmarks
 
 ```sh
-
-```sh
-cargo test --all
+cargo test --all      # profile.test is opt-level 3 — the suite runs millions of MC trials
 cargo clippy --all-targets -- -D warnings
-cargo fmt --all --check
 cargo bench -p sinistra-core
 ```
 
+## Workspace layout
+
+| crate  | kind                 | contents |
+| ------ | -------------------- | -------- |
+| `core` | library              | the model and both estimators: `Params`, `Trial`, `simulate_trial`, `simulate_n`, `summary_stats`, `ez_diffusion`, `fit_simulation`, `default_fit_guess` |
+| `cli`  | binary (`sinistra`)  | thin CSV wrapper — `simulate`, `fit-ez`, `fit-sim` |
+| `py`   | cdylib               | PyO3 + rust-numpy bindings (`import sinistra`), built with maturin |
+
+Analysis scripts and their figures live in `py/examples/` and
+`py/benchmarks/`; the HLJT dataset is vendored under `data/hljt/`.
+
+## Data attribution
+
+The dataset in `data/hljt/` (used only by the Phase 7 analysis):
+
+> Moreno-Verdú M, McAteer SM, Waltzing BM, Van Caenegem E, Hardwick RM (2025).
+> Development and validation of an open-source Hand Laterality Judgement Task
+> for in-person and online studies. Neuroscience.
+> https://doi.org/10.1016/j.neuroscience.2025.02.056
+> Data from OSF project https://osf.io/8h7ec/, licensed CC BY 4.0.
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+`sinistra`'s own code is MIT — see [LICENSE](LICENSE). The vendored HLJT data
+is CC BY 4.0 (cited above).
+
+## Known limitations & future directions
+
+- **No hierarchical fitting.** Both estimators fit a single DDM to a flat pool
+  of trials. A per-subject / hierarchical model is the natural next step,
+  especially for data with real individual variation.
+- **One real dataset so far.** The HLJT analysis is a proof of concept; more
+  public choice-RT datasets would exercise the tooling harder.
+- **A fixed model.** `starting_point` and `noise_sd` are held at `0.5` and
+  `1.0` rather than fitted, and across-trial parameter variability isn't
+  modelled.
+- **Not packaged yet.** No crates.io or PyPI release — `pip install sinistra`
+  does not work today. Publishing (with a PyPI-facing rewrite of
+  `py/README.md`) is planned.
