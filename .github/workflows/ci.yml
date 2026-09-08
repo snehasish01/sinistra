@@ -19,6 +19,13 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # The `py` crate links libpython under `cargo test`/`clippy` (the
+      # extension-module feature is off outside maturin builds).
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
@@ -30,3 +37,26 @@ jobs:
 
       - name: cargo test
         run: cargo test --all
+
+  python:
+    name: python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build and smoke-test bindings
+        working-directory: py
+        run: |
+          pip install maturin pytest numpy
+          maturin develop --release
+          pytest -v

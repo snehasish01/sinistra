@@ -2,9 +2,8 @@
 
 A drift-diffusion model (DDM) simulator for cognitive science research.
 
-> Status: **phase 0/1** — simulator, plus two parameter estimators
-> (closed-form EZ-diffusion and simulation-based Nelder–Mead). No Python
-> bindings yet.
+> Status: simulator + two parameter estimators (closed-form EZ-diffusion and
+> simulation-based Nelder–Mead) + Python bindings.
 
 ## Workspace layout
 
@@ -12,6 +11,7 @@ A drift-diffusion model (DDM) simulator for cognitive science research.
 | ------ | ------- | ------------------------------------------------------------------------------ |
 | `core` | library | `Params`, `Trial`, `simulate_trial`, `simulate_n`, `summary_stats`, `ez_diffusion`, `fit_simulation` |
 | `cli`  | binary  | `sinistra` — thin command-line wrapper around `core`                            |
+| `py`   | cdylib  | PyO3 bindings (`import sinistra`), built with maturin — see [py/README.md](py/README.md) |
 
 ## The model
 
@@ -66,6 +66,22 @@ cargo run -p sinistra-cli -- fit-sim --input trials.csv --max-iters 150
 Both estimators reduce data through the one shared `summary_stats` helper.
 The simulation fit is slower (≈0.3–2 s vs microseconds) but makes no
 closed-form approximation, so it carries no discretization bias.
+
+### Python
+
+```python
+import sinistra
+choices, rts, n_excluded = sinistra.simulate(drift=1.2, boundary=1.0, start=0.5,
+                                             t0=0.25, n=1_000_000, seed=42)
+# choices: np.ndarray[bool], rts: np.ndarray[float64]
+ez  = sinistra.fit_ez(choices, rts)
+sim = sinistra.fit_sim(choices, rts, initial_guess=ez, max_iters=200)
+```
+
+`simulate()` runs at ~1.52M trials/sec from Python — matching the Rust core
+benchmark (NumPy arrays, no per-trial marshalling).
+
+Build with maturin — see [py/README.md](py/README.md).
 
 ## Development
 

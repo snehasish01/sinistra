@@ -1,0 +1,25 @@
+[package]
+name = "sinistra-py"
+description = "Python bindings for sinistra-core, a drift-diffusion model simulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "_sinistra"
+# cdylib for the Python extension module; rlib so `cargo test`/`clippy`/`doc`
+# can build the crate normally on the workspace.
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+sinistra-core = { path = "../core" }
+# `extension-module` is NOT enabled here: that would stop the crate linking
+# libpython, breaking `cargo test` on platforms without dynamic-lookup (CI).
+# maturin turns it on for wheel builds via `[tool.maturin] features` in
+# pyproject.toml.
+pyo3 = { version = "0.29", features = ["abi3-py39"] }
+numpy = "0.29"
