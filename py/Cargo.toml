@@ -7,6 +7,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 publish = false
+# Dev-only scripts and their committed PNGs have no place in the PyPI sdist.
+exclude = ["benches/", "benchmarks/", "examples/"]
 
 [lib]
 name = "_sinistra"

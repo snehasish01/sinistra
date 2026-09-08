@@ -1,0 +1,214 @@
+name: Release
+
+# Builds cross-platform wheels + an sdist for the `sinistra` Python package
+# (py/) and, separately, the `sinistra-core` / `sinistra-cli` crates.
+#
+# Triggers:
+#   * push of a `v*` tag  -> BUILD ONLY. Artifacts are uploaded to the workflow
+#     run; nothing is published anywhere.
+#   * manual "Run workflow" (workflow_dispatch) -> build, and additionally
+#     publish IF `publish_target` is set to something other than `none`.
+#
+# So a real publish never happens by accident on a tag push — it takes a
+# deliberate manual dispatch with the target selected. Tokens are read from the
+# `PYPI_API_TOKEN` and `CARGO_REGISTRY_TOKEN` repository secrets (add these in
+# GitHub → Settings → Secrets and variables → Actions); they are never written
+# into this file.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish_target:
+        description: "What to publish (leave 'none' to only build artifacts)"
+        type: choice
+        default: none
+        options:
+          - none
+          - pypi
+          - crates-io
+          - both
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ------------------------------------------------------------------ build ---
+  wheels-linux:
+    name: wheels · linux · ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheels (manylinux)
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: --release --out dist
+          sccache: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: py/dist/*.whl
+
+  wheels-musllinux:
+    name: wheels · musllinux · x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheels (musllinux)
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py
+          target: x86_64
+          manylinux: musllinux_1_2
+          args: --release --out dist
+          sccache: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-musllinux-x86_64
+          path: py/dist/*.whl
+
+  wheels-windows:
+    name: wheels · windows · x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py
+          target: x64
+          args: --release --out dist
+          sccache: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x64
+          path: py/dist/*.whl
+
+  wheels-macos:
+    name: wheels · macos · ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          sccache: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: py/dist/*.whl
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: py/dist/*.tar.gz
+
+  smoke-test-sdist:
+    name: sdist · build & import check
+    needs: [sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - name: pip install the sdist and import
+        run: |
+          # --no-binary sinistra: force the sdist to build from source
+          # (its whole point) while numpy still installs as a wheel.
+          pip install --no-binary sinistra dist/*.tar.gz
+          python -c "import sinistra, numpy; c, r, _ = sinistra.simulate(drift=1.0, boundary=1.0, start=0.5, t0=0.2, n=5000, seed=1); print('sdist ok:', c.dtype, r.dtype, sinistra.__version__)"
+
+  # ---------------------------------------------------------------- publish ---
+  # These jobs run ONLY on a manual dispatch with publish_target selected.
+  # They never run on a tag push. Each targets a GitHub Environment so you can
+  # add required-reviewer protection in Settings → Environments if you want a
+  # second gate.
+
+  publish-pypi:
+    name: publish · PyPI
+    needs:
+      [wheels-linux, wheels-musllinux, wheels-windows, wheels-macos, sdist, smoke-test-sdist]
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.publish_target == 'pypi' || inputs.publish_target == 'both')
+    environment: pypi
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - name: Upload to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
+          attestations: false
+
+  publish-crates:
+    name: publish · crates.io
+    needs:
+      [wheels-linux, wheels-musllinux, wheels-windows, wheels-macos, sdist, smoke-test-sdist]
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.publish_target == 'crates-io' || inputs.publish_target == 'both')
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo publish (sinistra-core, then sinistra-cli)
+        run: cargo publish -p sinistra-core -p sinistra-cli
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
