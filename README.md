@@ -202,3 +202,4 @@ is CC BY 4.0 (cited above).
 - **A fixed model.** `starting_point` and `noise_sd` are held at `0.5` and
   `1.0` rather than fitted, and across-trial parameter variability isn't
   modelled.
+
